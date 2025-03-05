@@ -1,5 +1,6 @@
 import argparse
 import psycopg2
+from psycopg2 import sql
 from faker import Faker
 import random
 import time
@@ -12,6 +13,7 @@ def parse_arguments():
     parser.add_argument("--db_host", type=str, default="localhost", help="Database host")
     parser.add_argument("--db_port", type=int, default=5432, help="Database port")
     parser.add_argument("--num_records", type=int, default=100, help="Number of records to insert")
+    parser.add_argument("--replication_slot", type=str, default="cdc_slot", help="Replication slot name")
     return parser.parse_args()
 
 # Create database connection
@@ -24,6 +26,18 @@ def connect_db(args):
         port=args.db_port
     )
     return conn
+
+# Create replication slot if not exists
+def create_replication_slot(conn, slot_name):
+    with conn.cursor() as cur:
+        try:
+            # Create replication slot for logical replication
+            cur.execute(sql.SQL("SELECT pg_create_logical_replication_slot(%s, 'test_decoding')"),
+                        [slot_name])
+            conn.commit()
+            print(f"Replication slot '{slot_name}' created successfully.")
+        except psycopg2.errors.DuplicateObject:
+            print(f"Replication slot '{slot_name}' already exists.")
 
 # Create table if not exists
 def create_table(conn):
@@ -68,10 +82,11 @@ def insert_data(conn, num_records):
 # Main function
 def main():
     args = parse_arguments()
-    conn = connect_db(args)
-    create_table(conn)
-    insert_data(conn, args.num_records)
-    conn.close()
+    with connect_db(args) as conn:
+        # Create replication slot before creating the table
+        create_replication_slot(conn, args.replication_slot)
+        create_table(conn)
+        insert_data(conn, args.num_records)
     print(f"Database populated with {args.num_records} random records.")
 
 if __name__ == "__main__":
