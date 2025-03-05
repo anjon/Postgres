@@ -1,0 +1,23 @@
+name: 'database'
+
+services:
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    hostname: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: kafkadb
+    ports:
+      - "5432:5432"
+    command: ["postgres",
+      "-c", "wal_level=logical",
+      "-c", "max_replication_slots=5",
+      "-c", "max_wal_senders=5"
+    ]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
