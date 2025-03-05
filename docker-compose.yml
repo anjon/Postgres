@@ -2,7 +2,7 @@ name: 'database'
 
 services:
   postgres:
-    image: postgres:latest
+    image: postgres:16
     container_name: postgres
     hostname: postgres
     environment:
