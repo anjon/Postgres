@@ -6,14 +6,15 @@ import random
 import time
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Populate PostgreSQL database with random data.")
+    parser = argparse.ArgumentParser(description="Configure PostgreSQL for CDC and populate with random data.")
     parser.add_argument("--db_name", type=str, default="kafkadb", help="Database name")
     parser.add_argument("--db_user", type=str, default="postgres", help="Database user")
     parser.add_argument("--db_password", type=str, default="password", help="Database password")
     parser.add_argument("--db_host", type=str, default="localhost", help="Database host")
     parser.add_argument("--db_port", type=int, default=5432, help="Database port")
-    parser.add_argument("--num_records", type=int, default=100, help="Number of records to insert")
-    parser.add_argument("--replication_slot", type=str, default="cdc_slot", help="Replication slot name")
+    parser.add_argument("--num_records", type=int, default=10, help="Number of records to insert")
+    parser.add_argument("--replication_slot", type=str, default="debezium_slot", help="Replication slot name")
+    parser.add_argument("--publication_name", type=str, default="debezium_pub", help="Publication name")
     return parser.parse_args()
 
 # Create database connection
@@ -27,34 +28,86 @@ def connect_db(args):
     )
     return conn
 
-# Create replication slot if not exists
-def create_replication_slot(conn, slot_name):
-    with conn.cursor() as cur:
-        try:
-            # Create replication slot for logical replication
-            cur.execute(sql.SQL("SELECT pg_create_logical_replication_slot(%s, 'test_decoding')"),
-                        [slot_name])
-            conn.commit()
-            print(f"Replication slot '{slot_name}' created successfully.")
-        except psycopg2.errors.DuplicateObject:
-            print(f"Replication slot '{slot_name}' already exists.")
-
 # Create table if not exists
 def create_table(conn):
     with conn.cursor() as cur:
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS persons (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(50),
-                surname VARCHAR(50),
-                age INT,
-                gender VARCHAR(10),
-                country VARCHAR(100),
-                email VARCHAR(100)
-            )
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'persons'
+            );
         """)
-        conn.commit()
+        table_exists = cur.fetchone()[0]
+        
+        if table_exists:
+            print("Table 'persons' already exists.")
+        else:
+            cur.execute("""
+                CREATE TABLE persons (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(50),
+                    surname VARCHAR(50),
+                    age INT,
+                    gender VARCHAR(10),
+                    country VARCHAR(100),
+                    email VARCHAR(100)
+                )
+            """)
+            conn.commit()
+            print("Table 'persons' created successfully.")
 
+# Grant replication privileges
+def grant_replication_privileges(conn, user):
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER ROLE {user} WITH REPLICATION;")
+        conn.commit()
+        print(f"Replication privileges granted to user '{user}'.")
+
+# Verify existing replication slot and publication
+def verify_setup(conn, slot_name, publication_name):
+    with conn.cursor() as cur:
+        cur.execute("SELECT slot_name FROM pg_replication_slots WHERE slot_name = %s;", (slot_name,))
+        slot_exists = cur.fetchone() is not None
+
+        cur.execute("SELECT pubname FROM pg_publication WHERE pubname = %s;", (publication_name,))
+        publication_exists = cur.fetchone() is not None
+
+    return slot_exists, publication_exists
+
+# Create replication slot if not exists
+def create_replication_slot(conn, slot_name):
+    slot_exists, _ = verify_setup(conn, slot_name, "")
+    if slot_exists:
+        print(f"Replication slot '{slot_name}' already exists.")
+        return
+    
+    with conn.cursor() as cur:
+        try:
+            cur.execute(f"SELECT pg_create_logical_replication_slot('{slot_name}', 'pgoutput');")
+            conn.commit()
+            print(f"Replication slot '{slot_name}' created successfully.")
+        except Exception as e:
+            conn.rollback()
+            print(f"Error creating replication slot: {e}")
+
+# Create publication if not exists
+def create_publication(conn, publication_name):
+    _, publication_exists = verify_setup(conn, "", publication_name)
+    if publication_exists:
+        print(f"Publication '{publication_name}' already exists.")
+        return
+    
+    with conn.cursor() as cur:
+        try:
+            cur.execute(f"CREATE PUBLICATION {publication_name} FOR TABLE public.persons;")
+            conn.commit()
+            print(f"Publication '{publication_name}' created successfully.")
+        except Exception as e:
+            conn.rollback()
+            print(f"Error creating publication: {e}")
+
+# Insert random data
 # Insert random data with a 2-second delay
 def insert_data(conn, num_records):
     fake = Faker()
@@ -83,11 +136,23 @@ def insert_data(conn, num_records):
 def main():
     args = parse_arguments()
     with connect_db(args) as conn:
-        # Create replication slot before creating the table
-        create_replication_slot(conn, args.replication_slot)
-        create_table(conn)
-        insert_data(conn, args.num_records)
-    print(f"Database populated with {args.num_records} random records.")
+        try:
+            grant_replication_privileges(conn, args.db_user)
+            create_table(conn)  # Ensure the table exists before creating publication
+            
+            slot_exists, publication_exists = verify_setup(conn, args.replication_slot, args.publication_name)
+
+            if not slot_exists:
+                create_replication_slot(conn, args.replication_slot)
+
+            if not publication_exists:
+                create_publication(conn, args.publication_name)
+
+            insert_data(conn, args.num_records)
+            print(f"Database configured and populated with {args.num_records} records.")
+        except Exception as e:
+            conn.rollback()
+            print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
